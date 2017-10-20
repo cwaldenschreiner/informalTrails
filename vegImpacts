@@ -1,0 +1,318 @@
+#Python script to identify linear and aereal disturbances in open landscapes by extracting information from 
+#Normalized Vegetation Difference Index values from multispectral aerial imagery and calculating total area disturbed. 
+#Script also creates an ESRI ArcGIS mxd file of results, including disturbances mapped in the field for comparison. 
+
+import arcpy, sys, os
+arcpy.env.overwriteOutput = True
+
+if arcpy.CheckExtension("Spatial") == "Available":
+    arcpy.CheckOutExtension("Spatial")
+    print "Spatial Analyst extension checked out successfully."
+else:
+    print"Spatial Analyst extension required."
+
+#Specify top level directory containing code, data, and results subdirectories
+dirName = sys.argv[1]
+print "Directory set to {0}.\n".format(dirName)
+
+#Establish variable names for subdirectories
+code = dirName + "/code"
+data = dirName + "/data"
+imagery = data + "/imagery"
+boundaries = data + "/boundaries"
+disturbed = data + "/disturbed"
+results = data + "/results"
+
+#Import feature extraction and delete rasters modules
+sys.path.append(code)
+import featureExtract2, deleteRasters
+
+#Define and instantiate disturbedFeatures class
+class disturbedFeatures:
+    def __init__(self, classification, value = 0, numClass = 0):
+        '''Initialize informal trail properties.'''
+        self.classification = classification
+        self.value = value
+        self.numClass = numClass
+
+    def addNumClass(self):
+        '''Identify a numeric value based on condition class.'''
+        if self.classification == "Barren":
+            self.numClass = 3
+            return self.numClass
+        elif self.classification == "Some Bare Ground":
+            self.numClass = 2
+            return self.numClass
+        else:
+            self.numClass = 1
+            return self.numClass
+
+    def reportCount(self):
+        '''Report number of segments by classification type.'''
+        message = '\t\t{0} {1} segments identified.'.format(self.value, self.classification)
+        print message
+        arcpy.AddMessage(message)
+
+#Create raster mosaic from all orthophotos stored in imagery subdirectory
+arcpy.env.workspace = imagery
+deleteRasters.deleteNAIP(dirName, imagery)
+orthoRasts = sys.argv[2]
+message1 = "Creating raster mosaic using {0} orthophoto(s).".format(orthoRasts)
+print message1
+arcpy.AddMessage(message1)
+NAIP_all = arcpy.CreateRasterDataset_management(arcpy.env.workspace, "NAIP_all.tif", '#', '#', '#', '4', '#','#','#','#','#')
+arcpy.Mosaic_management (orthoRasts, NAIP_all)
+arcpy.SetProgressor('default')
+arcpy.SetProgressorLabel(message1)
+message2 = "\t{0} created successfully.\n".format(NAIP_all)
+print message2
+arcpy.AddMessage(message2)
+
+#Clip raster mosaic to each meadow boundary and move to imagery folder
+arcpy.env.workspace = boundaries
+print featureExtract2.meadowClip.__doc__
+featureExtract2.meadowClip(NAIP_all)
+clipRasts = arcpy.ListRasters("*clip*")
+message3 = "\t\tSaving clipped rasters to results subdirectory.\n"
+print message3
+arcpy.AddMessage(message3)
+for c in clipRasts:
+    newC = results + "/" + c
+    arcpy.Copy_management(c, newC)
+    arcpy.Delete_management(c)
+
+#Create NDVI rasters for each clipped image and save to results subdirectory
+arcpy.env.workspace = results
+print featureExtract2.calcNDVI.__doc__
+arcpy.AddMessage(featureExtract2.calcNDVI.__doc__)
+newClipRasts = arcpy.ListRasters("*OrthoClip*")
+for n in newClipRasts:
+    red = n + str(sys.argv[3])
+    NIR = n + str(sys.argv[4])
+    featureExtract2.calcNDVI (n, red, NIR)
+NDVIrasters = arcpy.ListRasters("*NDVI*")
+
+#Identify areas of bare ground and extract from NDVI
+arcpy.env.workspace = results
+NDVIrasters = arcpy.ListRasters("*NDVI*")
+print featureExtract2.extractValues.__doc__
+for n in NDVIrasters:
+    featureExtract2.extractValues(n)
+
+#Calculate extent of bare ground for each location by reclassifying raster and
+#obtaining raster properties
+message5 = "\nReclassifying bare ground rasters for statistical analysis."
+print message5
+arcpy.AddMessage(message5)
+deleteRasters.deleteReclass(dirName, results)
+bareRasters = arcpy.ListRasters("*BareGround*")
+for b in bareRasters:
+    reclassOut = b[:-4] + "_Reclass.tif"
+    valueExpression = "-1 1 1; NODATA 0"
+    reclassRast = arcpy.sa.Reclassify(b, "Value", valueExpression, "NODATA")
+    reclassRast.save(reclassOut)
+    message6 = "\t{0} created successfully.".format(reclassOut)
+    print message6
+    arcpy.AddMessage(message6)
+
+message7 = "\nCalculating bare ground extracted from NDVI rasters."
+print message7
+arcpy.AddMessage(message7)
+reclassRasters = arcpy.ListRasters("*Reclass*")
+for r in reclassRasters:
+    sc = arcpy.SearchCursor(r)
+    for row in sc:
+        rMeadow = r[:4]
+        value =  row.getValue("VALUE")
+        if value == 1:
+            area = row.getValue("COUNT")
+            message8 = "\tBare ground extracted in {0} is {1} sq. meters.".format(rMeadow, area)
+            print message8
+            arcpy.AddMessage(message8)
+    del sc
+
+#Identify classified segments from mapped trail disturbance
+arcpy.env.workspace = disturbed
+trailLayers = arcpy.ListFeatureClasses("*S1*")
+for t in trailLayers:
+    field = ['Classifica']
+    sc = arcpy.da.SearchCursor(t, field)
+    segDict = {}
+    #Read classified rows in shapefile and count total for all classes
+    for row in sc:
+        classification = str(row[0])
+        if classification in segDict:
+            segDict[classification] = segDict[classification] + 1
+        else:
+            segDict[classification] = 1
+    del sc
+    #Create disturbedFeatures class object
+    newDict = {}
+    for key in segDict.keys():
+        catClass = key
+        segCount = segDict[key]
+        trailSeg = disturbedFeatures(catClass, segCount)
+        newDict[catClass] = trailSeg
+    #Call reportCount method from disturbedFeatures class
+    message0 = "\nBreakdown of classified segments in {0}:".format(t)
+    print message0
+    arcpy.AddMessage(message0)
+    for n in newDict.values():
+        n.reportCount()
+
+#Calculate actual extent of bare ground only from mapped trail disturbance
+print "\nComparing results of extracted bare ground to actual mapped disturbance features."
+arcpy.env.workspace = disturbed
+trailLayers = arcpy.ListFeatureClasses("*S1*")
+
+message9 = "\nCalculating bare ground identified in mapped informal trails."
+print message9
+arcpy.AddMessage(message9)
+
+for t in trailLayers:
+    bareGroundOut = t[:-6] + "BareGround.shp"
+    arcpy.AddField_management(t, "Width_m", "FLOAT")
+    arcpy.CalculateField_management(t, "Width_m",
+    "[Trail_Widt]*0.0254", "VB", "#")
+    arcpy.Select_analysis(t, bareGroundOut, """ "Classifica" = 'Barren' OR "Classifica" = 'Some Bare Ground' """)
+    arcpy.AddField_management(bareGroundOut, "WidthHalf", "FLOAT")
+    arcpy.CalculateField_management(bareGroundOut, "WidthHalf","[Width_m]/2", "VB", "#")
+    bareExtent = bareGroundOut[:-4] + "_widthBuff.shp"
+    arcpy.Buffer_analysis(bareGroundOut, bareExtent, "WidthHalf", "FULL", "ROUND", "ALL", "#")
+    arcpy.AddField_management(bareExtent, "Area_m2", "FLOAT")
+    expression = "!SHAPE.AREA!"
+    arcpy.CalculateField_management(bareExtent, "Area_m2", expression, 'PYTHON')
+
+bufferLayers = arcpy.ListFeatureClasses("*widthBuff*")
+for layer in bufferLayers:
+    meadowName = layer[5:9]
+    field = "Area_m2"
+    sc = arcpy.da.SearchCursor(layer, field)
+    for row in sc:
+        area = row[0]
+    message10 = "\tBare ground mapped from informal trails in {0} is {1:.2f} sq. meters.".format(meadowName, area)
+    print message10
+    arcpy.AddMessage(message10)
+
+#Calculate actual extent from mapped areal disturbance
+polyLayers = arcpy.ListFeatureClasses("*D1*")
+message11 = "\nCalculating bare ground in mapped areal disturbance features."
+print message11
+arcpy.AddMessage(message11)
+
+for p in polyLayers:
+    bareGroundPolyOut = p[:-6] + "BareGroundPoly.shp"
+    arcpy.Select_analysis(p, bareGroundPolyOut, """ "Classifica" = 'Barren' OR "Classifica" = 'Some Bare Ground' """)
+    arcpy.AddField_management(bareGroundPolyOut, "Area_m2", "FLOAT")
+    expression = "!SHAPE.AREA!"
+    arcpy.CalculateField_management(bareGroundPolyOut, "Area_m2", expression, 'PYTHON')
+
+areaLayers = arcpy.ListFeatureClasses("*BareGroundPoly*")
+for layer in areaLayers:
+    statOut = layer[:-4]+"_area.dbf"
+    statOut2 = layer[:-4] + "_areaSum.dbf"
+    mName = layer[5:9]
+    arcpy.MakeTableView_management(layer, statOut)
+    arcpy.Statistics_analysis(statOut, statOut2, "Area_m2 SUM", "#")
+    field = "SUM_Area_m"
+    sc = arcpy.da.SearchCursor(statOut2, field)
+    for row in sc:
+        area = row[0]
+    message12 = "\tBare ground from mapped areal disturbance in {0} is {1:.2f} sq. meters.".format(mName, area)
+    print message12
+    arcpy.AddMessage(message12)
+    del sc
+
+#Add trail and areal disturbances together for total mapped disturbance
+#and compare extracted (i.e., from NDVI) and mapped results for accuracy
+message13 = "\nCalculating total bare ground in all mapped disturbance features."
+print message13
+arcpy.AddMessage(message13)
+
+mergeFeatures1 = arcpy.ListFeatureClasses("*BareGroundPoly*")
+mergeFeatures2 = arcpy.ListFeatureClasses("*BareGround_widthBuff*")
+
+for m in mergeFeatures1:
+    for f in mergeFeatures2:
+        if m[5:9] == f[5:9]:
+            outFile = m[5:9] + "_BareMerged.shp"
+            arcpy.Merge_management([m, f], outFile)
+
+message4 = "\t\tSaving merged rasters to results subdirectory.\n"
+print message4
+arcpy.AddMessage(message4)
+mergedFeatures = arcpy.ListFeatureClasses("*BareMerged*")
+for m in mergedFeatures:
+    newM = results + "/" + m
+    arcpy.Copy_management(m, newM)
+    arcpy.Delete_management(m)
+
+arcpy.env.workspace = results
+
+mergedFeatures = arcpy.ListFeatureClasses("*BareMerged*")
+for m in mergedFeatures:
+    statOut = m[:4]+"_BareMerge.dbf"
+    statOut2 = m[:4] + "_BareSum.dbf"
+    locName = m[:4]
+    arcpy.MakeTableView_management(m, statOut)
+    arcpy.Statistics_analysis(statOut, statOut2, "Area_m2 SUM", "#")
+    field = "SUM_Area_m"
+    sc = arcpy.da.SearchCursor(statOut2, field)
+    for row in sc:
+        area = row[0]
+    message14 = "\tTotal amount of bare ground mapped in {0} is {1:.2f} sq. meters.".format(locName, area)
+    print message14
+    arcpy.AddMessage(message14)
+    del sc
+
+#Create mxd of results
+arcpy.env.workspace = results
+mapName = results + "/YOSE_Valley_BareGround.mxd"
+mxd = arcpy.mapping.MapDocument(mapName)
+mxd.title = "Visitor related bare ground in Yosemite Valley meadows"
+mxd.author = "Chelsey Walden-Schreiner"
+dfs = arcpy.mapping.ListDataFrames(mxd)
+
+lyrList = []
+orthoClips = arcpy.ListRasters("*OrthoClip*")
+lyrList.append(orthoClips)
+bareGroundReclass = arcpy.ListRasters("*BareGround_Reclass*")
+lyrList.append(bareGroundReclass)
+bareMerged = arcpy.ListFeatureClasses("*BareMerged*")
+lyrList.append(bareMerged)
+message15 = "Layers added and saved to map:"
+print message15
+arcpy.AddMessage(message15)
+message16 = lyrList
+print message16
+arcpy.AddMessage(message16)
+
+df = dfs[0]
+for l in lyrList:
+    i = 0
+    lyrFile = l[i]
+    addLayer = arcpy.mapping.Layer(lyrFile)
+    arcpy.mapping.AddLayer(df, addLayer, "TOP")
+    i = i + 1
+for l in lyrList:
+    i = 1
+    lyrFile = l[i]
+    addLayer = arcpy.mapping.Layer(lyrFile)
+    arcpy.mapping.AddLayer(df, addLayer, "TOP")
+    i = i + 1
+for l in lyrList:
+    i = 2
+    lyrFile = l[i]
+    addLayer = arcpy.mapping.Layer(lyrFile)
+    arcpy.mapping.AddLayer(df, addLayer, "TOP")
+    i = i + 1
+
+#Save a copy of the map.
+copyName = mapName[:-4] + "2.mxd"
+mxd.saveACopy(copyName)
+message17 = "{0} created and saved as {1}.".format(mapName, copyName)
+print message17
+arcpy.AddMessage(message17)
+
+#Delete the mapDocument object to release the map.
+del mxd
