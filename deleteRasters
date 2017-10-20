@@ -1,0 +1,21 @@
+#function to delete rasters within a subdirectory 
+
+import arcpy, os
+arcpy.CheckOutExtension("spatial")
+arcpy.env.overwriteOutput = True
+
+def deleteNAIP(dirName, subdirectory):
+    '''Deletes moasic raster 'NAIP_all' '''
+    for root, dirs, files in os.walk(dirName):
+        delRasters = arcpy.ListRasters("*NAIP_all*")
+        for d in delRasters:
+            delD = subdirectory + "/" + d
+            arcpy.Delete_management(delD)
+
+def deleteReclass(dirName, subdirectory):
+    '''Deleting rasters identified as reclassified.'''
+    for root, dirs, files in os.walk(dirName):
+        delRasters = arcpy.ListRasters("*Reclass*")
+        for d in delRasters:
+            delD = subdirectory + "/" + d
+            arcpy.Delete_management(delD)
