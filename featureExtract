@@ -1,0 +1,49 @@
+#featureExtract2.py
+
+import arcpy, sys, os
+arcpy.CheckOutExtension("Spatial")
+
+def meadowClip(inRast):
+    '''Clipping moasic raster to boundary feature class(es).'''
+    #List all feature classes that identify area of interest boundaries
+    fcs = arcpy.ListFeatureClasses("*boundary*")
+
+    #Clips the input raster to each boundary feature class listed
+    for boundary in fcs:
+        meadowBase = os.path.basename(boundary)
+        outClipRast = meadowBase[:4] + "_OrthoClip.tif"
+        arcpy.Clip_management(inRast, '#', outClipRast, boundary, "0", "ClippingGeometry")
+        print "\t{0} created successfully.".format(outClipRast)
+
+
+def calcNDVI(inClipRast, red, NIR):
+    '''Using red and near infrared spectral bands from imagery
+    to create a Normalized Difference Vegetation Index (NDVI) raster
+    for area(s) of interest (e.g., orthophoto clipped to boundary).'''
+    #Specify input raster and identify red and NIR bands
+    inClipRastBase = inClipRast[:4]
+    outNDVI = inClipRastBase + "_NDVI.tif"
+
+    #Create output rasters and copy
+    red_out = inClipRastBase + "_red.tif"
+    NIR_out = inClipRastBase + "_NIR.tif"
+    arcpy.CopyRaster_management(red, red_out)
+    arcpy.CopyRaster_management(NIR, NIR_out)
+
+    #Establish numerator and denomenator for map algebra and save result
+    numerator = arcpy.sa.Float(arcpy.Raster(NIR_out) - arcpy.Raster(red_out))
+    denom = arcpy.sa.Float(arcpy.Raster(NIR_out) + arcpy.Raster(red_out))
+
+    NDVI = arcpy.sa.Divide(numerator, denom)
+    NDVI.save(outNDVI)
+    print "\t{0} created successfully.".format(outNDVI)
+
+def extractValues(inNDVIRast):
+    '''Extracting values identified as bare ground (e.g., values between -0.1
+    and 0.1) from NDVI raster(s).'''
+    inNDVIRastBase = inNDVIRast[:4]
+    inSQL = "VALUE <= 0.1 and VALUE >= -0.1"
+    bareOut = inNDVIRastBase + "_BareGround.tif"
+    extractNDVI = arcpy.sa.ExtractByAttributes(inNDVIRast, inSQL)
+    extractNDVI.save(bareOut)
+    print "\t{0} created successfully.".format(bareOut)
