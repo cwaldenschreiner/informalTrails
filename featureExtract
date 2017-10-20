@@ -1,4 +1,5 @@
 #featureExtract2.py
+#Function to calculate NDVI from moasic raster and extract values associated with bare ground and impacted vegetation
 
 import arcpy, sys, os
 arcpy.CheckOutExtension("Spatial")
